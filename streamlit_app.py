@@ -1,56 +1,61 @@
 import streamlit as st
-from openai import OpenAI
+import pandas as pd
+from google.oauth2 import service_account
+from vertexai import init
+from vertexai.generative_models import GenerativeModel
+from vertexai.preview.generative_models import GenerativeModel
 
-# Show title and description.
-st.title("💬 Chatbot")
-st.write(
-    "This is a simple chatbot that uses OpenAI's GPT-3.5 model to generate responses. "
-    "To use this app, you need to provide an OpenAI API key, which you can get [here](https://platform.openai.com/account/api-keys). "
-    "You can also learn how to build this app step by step by [following our tutorial](https://docs.streamlit.io/develop/tutorials/llms/build-conversational-apps)."
+
+# Init Vertex AI
+creds = service_account.Credentials.from_service_account_file(
+    "succession-chatbot-personal-1548effd5fe5.json"
 )
 
-# Ask user for their OpenAI API key via `st.text_input`.
-# Alternatively, you can store the API key in `./.streamlit/secrets.toml` and access it
-# via `st.secrets`, see https://docs.streamlit.io/develop/concepts/connections/secrets-management
-openai_api_key = st.text_input("OpenAI API Key", type="password")
-if not openai_api_key:
-    st.info("Please add your OpenAI API key to continue.", icon="🗝️")
-else:
+init(
+    project="succession-chatbot-personal",
+    location="us-central1",
+    credentials=creds
+)
 
-    # Create an OpenAI client.
-    client = OpenAI(api_key=openai_api_key)
+# Load model
+model = GenerativeModel("gemini-2.0-flash")
 
-    # Create a session state variable to store the chat messages. This ensures that the
-    # messages persist across reruns.
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
+# Load KB
+kb = pd.read_excel("KB-Succession.xlsx")
 
-    # Display the existing chat messages via `st.chat_message`.
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+st.title("💬 Succession Planning Chatbot")
 
-    # Create a chat input field to allow the user to enter a message. This will display
-    # automatically at the bottom of the page.
-    if prompt := st.chat_input("What is up?"):
+def answer_with_gemini(prompt):
+    prompt_lower = prompt.lower()
 
-        # Store and display the current prompt.
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
+    # detect role from prompt
+    roles = [r for r in kb["Target_Role"].unique() if str(r).lower() in prompt_lower]
 
-        # Generate a response using the OpenAI API.
-        stream = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": m["role"], "content": m["content"]}
-                for m in st.session_state.messages
-            ],
-            stream=True,
-        )
+    if not roles:
+        return "❗ I couldn't identify any role from your question."
 
-        # Stream the response to the chat using `st.write_stream`, then store it in 
-        # session state.
-        with st.chat_message("assistant"):
-            response = st.write_stream(stream)
-        st.session_state.messages.append({"role": "assistant", "content": response})
+    role = roles[0].lower()
+    matches = kb[kb["Target_Role"].str.lower() == role]
+
+    if matches.empty:
+        return "❗ No candidates found for that role."
+
+    kb_context = "\n".join([
+        f"{row['Name']} - {row['Current_Role']} → {row['Target_Role']}, "
+        f"Exp {row['Experience']} yrs, Leadership {row['Leadership']}, "
+        f"Success {row['Project_Success_Rate']}%, Review {row['Last_Review_Score']}"
+        for _, row in matches.iterrows()
+    ])
+
+    response = model.generate_content(
+        f"Candidate data:\n{kb_context}\n\nUser question: {prompt}"
+    )
+
+    return response.text
+
+prompt = st.chat_input("Ask about successors...")
+
+if prompt:
+    st.chat_message("user").markdown(prompt)
+    ans = answer_with_gemini(prompt)
+    st.chat_message("assistant").markdown(ans)
